@@ -1,0 +1,37 @@
+# Telegram Bot Framework
+python-telegram-bot==21.0.1
+
+# Crypto Exchange APIs
+ccxt==4.1.68
+
+# Data Analysis
+pandas==2.1.4
+numpy==1.24.4
+
+# Technical Analysis
+ta==0.10.2
+
+# News and Web Scraping
+feedparser==6.0.10
+requests==2.31.0
+
+# Task Scheduling
+apscheduler==3.10.4
+
+# Альтернативні бібліотеки для розширеної функціональності
+# TA-Lib==0.4.28  # Для більш потужного технічного аналізу
+# nltk==3.8.1     # Для аналізу сентиментів новин
+# textblob==0.17.1 # Для обробки тексту
+# plotly==5.17.0  # Для створення графіків
+# aiogram==3.3.0  # Альтернатива python-telegram-bot
+
+# Environment Variables
+python-dotenv==1.0.0
+
+# Optional: Better Logging
+# colorlog==6.8.0
+
+# Development Dependencies (uncomment for development)
+# pytest==7.4.3
+# black==23.11.0
+# flake8==6.1.0
