@@ -630,6 +630,85 @@ class CryptoTradingBot:
         except ValueError:
             await update.message.reply_text("❌ Invalid values. Use integers like: /setscore 2 -2")
 
+    # Команда для запуску бектесту
+    async def backtest_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+
+        if len(context.args) != 2:
+            await update.message.reply_text("Use: /backtest <TICKER> <PERIOD>\nExample: /backtest BTCUSDT 30d")
+            return
+
+        ticker = context.args[0].upper()
+        period_str = context.args[1].lower()
+        period_map = {"7d": 7, "14d": 14, "30d": 30, "60d": 60}
+        if period_str not in period_map:
+            await update.message.reply_text("Supported periods: 7d, 14d, 30d, 60d")
+            return
+
+        days = period_map[period_str]
+        limit = days * 6  # 4h candles → 6 per day
+
+        await update.message.reply_text(f"Running backtest for {ticker} ({period_str})...")
+
+        try:
+            df = await self.get_crypto_data(ticker, '4h', limit)
+            if df.empty or len(df) < 100:
+                await update.message.reply_text("Not enough data to backtest.")
+                return
+
+            settings = self.get_user_settings(user_id)
+            buy_th = settings.get('buy_threshold', 3)
+            sell_th = settings.get('sell_threshold', -3)
+
+            position_open = False
+            entry_price = 0.0
+            total_return = 0.0
+            buy_signals = 0
+            sell_signals = 0
+            hold_count = 0
+            wins = 0
+            losses = 0
+
+            for i in range(99, len(df)):
+                partial_df = df.iloc[:i+1].copy()
+                analysis = self.calculate_technical_indicators(partial_df, buy_th, sell_th)
+                if not analysis:
+                    continue
+
+                if analysis.recommendation == "✅ BUY" and not position_open:
+                    entry_price = analysis.price
+                    position_open = True
+                    buy_signals += 1
+
+                elif analysis.recommendation == "❌ SELL" and position_open:
+                    change = (analysis.price - entry_price) / entry_price * 100
+                    total_return += change
+                    if change > 0:
+                        wins += 1
+                    else:
+                        losses += 1
+                    sell_signals += 1
+                    position_open = False
+
+                else:
+                    hold_count += 1
+
+            winrate = (wins / (wins + losses)) * 100 if (wins + losses) > 0 else 0
+
+            summary = f"📊 Backtest for {ticker} ({period_str})\n\n"
+            summary += f"✅ BUY signals: {buy_signals}\n"
+            summary += f"❌ SELL signals: {sell_signals}\n"
+            summary += f"⏸️ HOLD: {hold_count}\n\n"
+            summary += f"📈 Total return: {total_return:.2f}%\n"
+            summary += f"🎯 Win rate: {winrate:.1f}%"
+
+            await update.message.reply_text(summary)
+
+        except Exception as e:
+            import logging
+            logging.error(f"Backtest error: {e}")
+            await update.message.reply_text("Error during backtest")
+
     # Коаманда /help
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обробляє команду /help"""
@@ -651,6 +730,10 @@ class CryptoTradingBot:
 🔕 /disablealerts - вимкнути автоматичні сповіщення
 
 🔢 /setscore <BUY> <SELL> | (3, -3) defaults - встановити значення Score при якому бот дає рекомендацію
+
+🔙 /backtest <TICKER> <PERIOD> - бек-тестинг стратегії.
+   Example: /backtest BTCUSDT 30d
+   Доступні періоди: 7d, 14d, 30d, 60d
 
 📊 Технічний аналіз включає:
 • Ковзні середні (MA7, MA25, MA99)
@@ -992,6 +1075,7 @@ class CryptoTradingBot:
             self.application.add_handler(CommandHandler("enablealerts", self.enablealerts_command))
             self.application.add_handler(CommandHandler("disablealerts", self.disablealerts_command))
             self.application.add_handler(CommandHandler("setscore", self.setscore_command))
+            self.application.add_handler(CommandHandler("backtest", self.backtest_command))
 
             # Реєструємо обробники callback запитів
             self.application.add_handler(CallbackQueryHandler(self.callback_query_handler))
