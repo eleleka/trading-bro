@@ -5,7 +5,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 
 import ccxt
@@ -42,6 +42,7 @@ class TechnicalAnalysis:
     trend: str
     support_level: float = 0.0
     resistance_level: float = 0.0
+    reasons: list = field(default_factory=list)
 
 @dataclass
 class NewsAnalysis:
@@ -336,6 +337,12 @@ class CryptoTradingBot:
         # Зміна об'єму
         df['volume_change'] = df['volume'].pct_change() * 100
 
+        # обчислення індикаторів
+        df['macd'] = ta.trend.macd(df['close'])
+        df['macd_signal'] = ta.trend.macd_signal(df['close'])
+        df['bb_high'] = ta.volatility.bollinger_hband(df['close'])
+        df['bb_low'] = ta.volatility.bollinger_lband(df['close'])
+        df['adx'] = ta.trend.adx(df['high'], df['low'], df['close'])
         # Отримуємо останні значення
         latest = df.iloc[-1]
 
@@ -351,10 +358,12 @@ class CryptoTradingBot:
             trend = "➡️ SIDEWAYS"
 
         # Генеруємо рекомендацію
-        recommendation = self.generate_recommendation(
+        recommendation, reasons = self.generate_recommendation(
             latest['rsi'], trend, latest['volume_change'],
             latest['close'], support, resistance,
-            buy_threshold, sell_threshold
+            macd=latest['macd'], macd_signal=latest['macd_signal'],
+            bb_low=latest['bb_low'], bb_high=latest['bb_high'],
+            adx=latest['adx'], buy_threshold=buy_threshold, sell_threshold=sell_threshold
         )
 
         return TechnicalAnalysis(
@@ -367,49 +376,84 @@ class CryptoTradingBot:
             recommendation=recommendation,
             trend=trend,
             support_level=support,
-            resistance_level=resistance
+            resistance_level=resistance,
+            reasons=reasons
         )
 
     def generate_recommendation(self, rsi, trend, volume_change, price, support, resistance,
-                            buy_threshold=3, sell_threshold=-3) -> str:
-        """Генерує рекомендацію на основі технічних індикаторів"""
+                                macd=None, macd_signal=None, bb_low=None, bb_high=None, adx=None,
+                                buy_threshold=3, sell_threshold=-3):
         score = 0
+        reasons = []
 
-        # RSI аналіз
+        # RSI
         if rsi < 30:
-            score += 2  # Перепроданість - сигнал до покупки
+            score += 2
+            reasons.append(f"RSI {rsi:.1f} → перепроданість")
         elif rsi > 70:
-            score -= 2  # Перекупленість - сигнал до продажу
+            score -= 2
+            reasons.append(f"RSI {rsi:.1f} → перекупленість")
         elif 30 <= rsi <= 50:
-            score += 1  # Нейтральна зона з нахилом до покупки
+            score += 1
+            reasons.append(f"RSI {rsi:.1f} → помірний бичачий сигнал")
 
-        # Тренд аналіз
+        # Trend
         if "UP" in trend:
             score += 2
+            reasons.append("Тренд спрямований вгору")
         elif "DOWN" in trend:
             score -= 2
+            reasons.append("Тренд спрямований вниз")
 
-        # Об'єм
+        # Volume
         if volume_change > 10:
             score += 1
+            reasons.append(f"Обʼєм зростає ({volume_change:.1f}%)")
         elif volume_change < -10:
             score -= 1
+            reasons.append(f"Обʼєм падає ({abs(volume_change):.1f}%)")
 
-        # Аналіз відносно рівнів підтримки/опору
+        # Support/resistance
         if support > 0 and resistance > 0:
-            price_position = (price - support) / (resistance - support)
-            if price_position < 0.2:  # Близько до підтримки
+            position = (price - support) / (resistance - support)
+            if position < 0.2:
                 score += 1
-            elif price_position > 0.8:  # Близько до опору
+                reasons.append("Ціна біля рівня підтримки")
+            elif position > 0.8:
                 score -= 1
+                reasons.append("Ціна біля рівня опору")
 
-        # Генеруємо рекомендацію
+        # MACD
+        if macd is not None and macd_signal is not None:
+            if macd > macd_signal:
+                score += 1
+                reasons.append("MACD перетнув сигнал вверх")
+            elif macd < macd_signal:
+                score -= 1
+                reasons.append("MACD перетнув сигнал вниз")
+
+        # Bollinger Bands
+        if bb_low is not None and price < bb_low:
+            score += 1
+            reasons.append("Ціна нижче нижньої межі Bollinger")
+        elif bb_high is not None and price > bb_high:
+            score -= 1
+            reasons.append("Ціна вище верхньої межі Bollinger")
+
+        # ADX
+        if adx is not None and adx > 20:
+            score += 1
+            reasons.append(f"Сильний тренд (ADX {adx:.1f})")
+
+        # Рішення
         if score >= buy_threshold:
-            return "✅ BUY"
+            recommendation = "✅ BUY"
         elif score <= sell_threshold:
-            return "❌ SELL"
+            recommendation = "❌ SELL"
         else:
-            return "⏸️ HOLD"
+            recommendation = "⏸️ HOLD"
+
+        return recommendation, reasons
 
     async def analyze_btc_trend(self) -> str:
         """Аналізує тренд BTC як додатковий фільтр"""
@@ -534,24 +578,29 @@ class CryptoTradingBot:
             volume_text = f"стабільний ({analysis.volume_change:.1f}%)"
 
         message = f"""📊 {ticker} (4H)
-💰 Ціна: {analysis.price:.8f}
-Рекомендація: {analysis.recommendation}
+        💰 Ціна: {analysis.price:.8f}
+        Рекомендація: {analysis.recommendation}
 
-🔍 Аналіз:
-• {ma_trend}
-• RSI: {analysis.rsi:.1f} ({rsi_interpretation})
-• ₿ BTC тренд: {btc_trend}
-• 📦 Об'єм: {volume_text}
+        🔎 Причина: {analysis.reasons}
 
-📏 Технічні рівні:
-• 🔻 Підтримка: {analysis.support_level:.8f}
-• 🔺 Опір: {analysis.resistance_level:.8f}"""
+        🔍 Аналіз:
+        • {ma_trend}
+        • RSI: {analysis.rsi:.1f} ({rsi_interpretation})
+        • ₿ BTC тренд: {btc_trend}
+        • 📦 Об'єм: {volume_text}
+
+        📏 Технічні рівні:
+        • 🔻 Підтримка: {analysis.support_level:.8f}
+        • 🔺 Опір: {analysis.resistance_level:.8f}"""
 
         # Додаємо новини якщо є
         if news and news.sentiment != "❓ UNKNOWN":
             message += f"\n\n📰 Новини: {news.sentiment}\n{news.impact}"
             if news.summary and news.summary != "Немає значних новин":
                 message += f"\n{news.summary}"
+
+        #if analysis.reasons:
+        #    message += "\\n\\n\\n🔎 Причина: " + "; ".join(analysis.reasons)
 
         return message
 
