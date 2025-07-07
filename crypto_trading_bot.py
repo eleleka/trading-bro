@@ -130,6 +130,8 @@ class CryptoTradingBot:
                 alerts_enabled BOOLEAN DEFAULT TRUE,
                 chat_id INTEGER,
                 watchlist TEXT DEFAULT '[]',
+                buy_threshold INTEGER DEFAULT 3,
+                sell_threshold INTEGER DEFAULT -3,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -171,7 +173,7 @@ class CryptoTradingBot:
         cursor = conn.cursor()
 
         cursor.execute('''
-            SELECT ticker, interval_hours, alerts_enabled, chat_id, watchlist
+            SELECT ticker, interval_hours, alerts_enabled, chat_id, watchlist, buy_threshold, sell_threshold
             FROM user_settings WHERE user_id = ?
         ''', (user_id,))
 
@@ -185,7 +187,9 @@ class CryptoTradingBot:
                 'interval_hours': result[1],
                 'alerts_enabled': result[2],
                 'chat_id': result[3],
-                'watchlist': watchlist
+                'watchlist': json.loads(result[4]) if result[4] else [],
+                'buy_threshold': result[5] if result[5] is not None else 3,
+                'sell_threshold': result[6] if result[6] is not None else -3
             }
         return {}
 
@@ -316,7 +320,7 @@ class CryptoTradingBot:
 
         return support, resistance
 
-    def calculate_technical_indicators(self, df: pd.DataFrame) -> TechnicalAnalysis:
+    def calculate_technical_indicators(self, df: pd.DataFrame, buy_threshold=3, sell_threshold=-3) -> TechnicalAnalysis:
         """Розраховує технічні індикатори"""
         if df.empty or len(df) < 99:
             return None
@@ -349,7 +353,8 @@ class CryptoTradingBot:
         # Генеруємо рекомендацію
         recommendation = self.generate_recommendation(
             latest['rsi'], trend, latest['volume_change'],
-            latest['close'], support, resistance
+            latest['close'], support, resistance,
+            buy_threshold, sell_threshold
         )
 
         return TechnicalAnalysis(
@@ -365,8 +370,8 @@ class CryptoTradingBot:
             resistance_level=resistance
         )
 
-    def generate_recommendation(self, rsi: float, trend: str, volume_change: float,
-                              price: float, support: float, resistance: float) -> str:
+    def generate_recommendation(self, rsi, trend, volume_change, price, support, resistance,
+                            buy_threshold=3, sell_threshold=-3) -> str:
         """Генерує рекомендацію на основі технічних індикаторів"""
         score = 0
 
@@ -399,9 +404,9 @@ class CryptoTradingBot:
                 score -= 1
 
         # Генеруємо рекомендацію
-        if score >= 3:
+        if score >= buy_threshold:
             return "✅ BUY"
-        elif score <= -3:
+        elif score <= sell_threshold:
             return "❌ SELL"
         else:
             return "⏸️ HOLD"
@@ -607,6 +612,25 @@ class CryptoTradingBot:
 
         await update.message.reply_text(message)
 
+    # Команди для налаштування
+    async def setscore_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if len(context.args) != 2:
+        await update.message.reply_text("❌ Use: /setscore <BUY_THRESHOLD> <SELL_THRESHOLD>\nExample: /setscore 2 -2")
+        return
+
+    try:
+        buy_threshold = int(context.args[0])
+        sell_threshold = int(context.args[1])
+
+        self.update_user_settings(user_id, buy_threshold=buy_threshold, sell_threshold=sell_threshold)
+        await update.message.reply_text(f"✅ Updated thresholds:\nBUY if score ≥ {buy_threshold}\nSELL if score ≤ {sell_threshold}")
+
+    except ValueError:
+        await update.message.reply_text("❌ Invalid values. Use integers like: /setscore 2 -2")
+
+    # Коаманда /help
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обробляє команду /help"""
         message = """📚 Довідка по командах:
@@ -670,6 +694,9 @@ class CryptoTradingBot:
     async def analyze_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обробляє команду /analyze"""
         user_id = update.effective_user.id
+        settings = self.get_user_settings(user_id)
+        buy_th = settings.get('buy_threshold', 3)
+        sell_th = settings.get('sell_threshold', -3)
 
         if not context.args:
             settings = self.get_user_settings(user_id)
@@ -693,7 +720,7 @@ class CryptoTradingBot:
                 return
 
             # Технічний аналіз
-            analysis = self.calculate_technical_indicators(df)
+            analysis = self.calculate_technical_indicators(df, buy_th, sell_th)
             if not analysis:
                 await update.message.reply_text("❌ Недостатньо даних для аналізу")
                 return
@@ -872,6 +899,9 @@ class CryptoTradingBot:
     async def schedule_analysis(self, user_id: int, ticker: str, interval_hours: int):
         """Планує автоматичний аналіз"""
         job_id = f"analysis_{user_id}"
+        settings = self.get_user_settings(user_id)
+        buy_th = settings.get('buy_threshold', 3)
+        sell_th = settings.get('sell_threshold', -3)
 
         # Видаляємо існуючий job якщо є
         if self.scheduler.get_job(job_id):
@@ -905,7 +935,7 @@ class CryptoTradingBot:
                 return
 
             # Технічний аналіз
-            analysis = self.calculate_technical_indicators(df)
+            analysis = self.calculate_technical_indicators(df, buy_th, sell_th)
             if not analysis:
                 return
 
@@ -959,6 +989,7 @@ class CryptoTradingBot:
             self.application.add_handler(CommandHandler("watchlist", self.watchlist_command))
             self.application.add_handler(CommandHandler("enablealerts", self.enablealerts_command))
             self.application.add_handler(CommandHandler("disablealerts", self.disablealerts_command))
+            self.application.add_handler(CommandHandler("setscore", self.setscore_command))
 
             # Реєструємо обробники callback запитів
             self.application.add_handler(CallbackQueryHandler(self.callback_query_handler))
