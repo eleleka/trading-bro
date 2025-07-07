@@ -614,21 +614,21 @@ class CryptoTradingBot:
 
     # Команди для налаштування
     async def setscore_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+        user_id = update.effective_user.id
 
-    if len(context.args) != 2:
-        await update.message.reply_text("❌ Use: /setscore <BUY_THRESHOLD> <SELL_THRESHOLD>\nExample: /setscore 2 -2")
-        return
+        if len(context.args) != 2:
+            await update.message.reply_text("❌ Use: /setscore <BUY_THRESHOLD> <SELL_THRESHOLD>\nExample: /setscore 2 -2")
+            return
 
-    try:
-        buy_threshold = int(context.args[0])
-        sell_threshold = int(context.args[1])
+        try:
+            buy_threshold = int(context.args[0])
+            sell_threshold = int(context.args[1])
 
-        self.update_user_settings(user_id, buy_threshold=buy_threshold, sell_threshold=sell_threshold)
-        await update.message.reply_text(f"✅ Updated thresholds:\nBUY if score ≥ {buy_threshold}\nSELL if score ≤ {sell_threshold}")
+            self.update_user_settings(user_id, buy_threshold=buy_threshold, sell_threshold=sell_threshold)
+            await update.message.reply_text(f"✅ Updated thresholds:\nBUY if score ≥ {buy_threshold}\nSELL if score ≤ {sell_threshold}")
 
-    except ValueError:
-        await update.message.reply_text("❌ Invalid values. Use integers like: /setscore 2 -2")
+        except ValueError:
+            await update.message.reply_text("❌ Invalid values. Use integers like: /setscore 2 -2")
 
     # Коаманда /help
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -649,6 +649,8 @@ class CryptoTradingBot:
 
 🔔 /enablealerts - увімкнути автоматичні сповіщення
 🔕 /disablealerts - вимкнути автоматичні сповіщення
+
+🔢 /setscore <BUY> <SELL> | (3, -3) defaults - встановити значення Score при якому бот дає рекомендацію
 
 📊 Технічний аналіз включає:
 • Ковзні середні (MA7, MA25, MA99)
