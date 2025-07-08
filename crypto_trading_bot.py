@@ -433,7 +433,7 @@ class CryptoTradingBot:
         if macd is not None and macd_signal is not None:
             if macd > macd_signal:
                 score += 1
-                reasons.append("• MACD перетнув сигнал вверх")
+                reasons.append("• MACD перетнув сигнал вгору")
             elif macd < macd_signal:
                 score -= 1
                 reasons.append("• MACD перетнув сигнал вниз")
@@ -1123,6 +1123,9 @@ class CryptoTradingBot:
             df = await self.get_crypto_data(ticker, '4h', 100)
             if df.empty:
                 return
+
+            buy_th = settings.get('buy_threshold', 3)
+            sell_th = settings.get('sell_threshold', -3)
 
             # Технічний аналіз
             analysis = self.calculate_technical_indicators(df, buy_th, sell_th)
