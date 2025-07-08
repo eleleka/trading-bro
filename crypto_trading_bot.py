@@ -1186,10 +1186,10 @@ class CryptoTradingBot:
             self.application.add_handler(CallbackQueryHandler(self.callback_query_handler))
 
             # Реєструємо обробник текстових повідомлень
-            self.application.add_handler(MessageHandler(
-                filters.TEXT & ~filters.COMMAND,
-                self.handle_ticker_input
-            ))
+            #self.application.add_handler(MessageHandler(
+            #    filters.TEXT & ~filters.COMMAND,
+            #    self.handle_ticker_input
+            #))
 
             # Запускаємо планувальник
             self.scheduler.start()
