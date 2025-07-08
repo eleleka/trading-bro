@@ -308,19 +308,22 @@ if __name__ == "__main__":
     exit_code = main()
     sys.exit(exit_code)
 
-# Пустий сервер, щоб Render вважав сервіс живим
+# Пустий сервер, щоб Render вважав сервіс живимч
 from flask import Flask
 import threading
 
 app = Flask(__name__)
 
-@app.route('/')
-def index():
-    return "Bot is running!"
+@app.route("/")
+def home():
+    return "✅ Bot is alive!"
 
-def run_web_server():
-    app.run(host='0.0.0.0', port=10000)
+def run_flask():
+    app.run(host="0.0.0.0", port=10000)
 
 if __name__ == "__main__":
-    threading.Thread(target=run_web_server).start()
+    # 🧵 Запускаємо Flask у окремому потоці
+    threading.Thread(target=run_flask).start()
+
+    # 🚀 Запускаємо самого бота
     main()
