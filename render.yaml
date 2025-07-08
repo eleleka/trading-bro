@@ -1,10 +1,11 @@
 services:
   - type: web
-    name: crypto-trading-bot
+    name: trading-bro
     env: python
     plan: free
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python crypto_trading_bot.py"
+    runtime: python3.10
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
