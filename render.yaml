@@ -1,5 +1,5 @@
 services:
-  - type: web
+  - type: worker
     name: trading-bro
     env: python
     plan: free
