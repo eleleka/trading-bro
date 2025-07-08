@@ -14,6 +14,8 @@ import numpy as np
 import ta
 import feedparser
 import requests
+import plotly.graph_objects as go
+import plotly.io as pio
 import matplotlib.pyplot as plt
 from io import BytesIO
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -22,6 +24,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
 load_dotenv()
+
 
 # Налаштування логування
 logging.basicConfig(
@@ -389,61 +392,64 @@ class CryptoTradingBot:
         # RSI
         if rsi < 30:
             score += 2
-            reasons.append(f"RSI {rsi:.1f} → перепроданість")
+            reasons.append(f"• RSI {rsi:.1f} → перепроданість")
         elif rsi > 70:
             score -= 2
-            reasons.append(f"RSI {rsi:.1f} → перекупленість")
+            reasons.append(f"• RSI {rsi:.1f} → перекупленість")
         elif 30 <= rsi <= 50:
             score += 1
-            reasons.append(f"RSI {rsi:.1f} → помірний бичачий сигнал")
+            reasons.append(f"• RSI {rsi:.1f} → помірний бичачий сигнал")
+        else:
+            score += 1
+            reasons.append(f"• RSI {rsi:.1f} → нейтральна зона")
 
         # Trend
         if "UP" in trend:
             score += 2
-            reasons.append("Тренд спрямований вгору")
+            reasons.append("• Тренд спрямований вгору (MA7 > MA25 > MA99)")
         elif "DOWN" in trend:
             score -= 2
-            reasons.append("Тренд спрямований вниз")
+            reasons.append("• Тренд спрямований вниз (MA7 < MA25 < MA99)")
 
         # Volume
         if volume_change > 10:
             score += 1
-            reasons.append(f"Обʼєм зростає ({volume_change:.1f}%)")
+            reasons.append(f"📦 Обʼєм зростає ({volume_change:.1f}%)")
         elif volume_change < -10:
             score -= 1
-            reasons.append(f"Обʼєм падає ({abs(volume_change):.1f}%)")
+            reasons.append(f"📦 Обʼєм падає ({abs(volume_change):.1f}%)")
 
         # Support/resistance
         if support > 0 and resistance > 0:
             position = (price - support) / (resistance - support)
             if position < 0.2:
                 score += 1
-                reasons.append("Ціна біля рівня підтримки")
+                reasons.append("• Ціна біля рівня підтримки")
             elif position > 0.8:
                 score -= 1
-                reasons.append("Ціна біля рівня опору")
+                reasons.append("• Ціна біля рівня опору")
 
         # MACD
         if macd is not None and macd_signal is not None:
             if macd > macd_signal:
                 score += 1
-                reasons.append("MACD перетнув сигнал вверх")
+                reasons.append("• MACD перетнув сигнал вверх")
             elif macd < macd_signal:
                 score -= 1
-                reasons.append("MACD перетнув сигнал вниз")
+                reasons.append("• MACD перетнув сигнал вниз")
 
         # Bollinger Bands
         if bb_low is not None and price < bb_low:
             score += 1
-            reasons.append("Ціна нижче нижньої межі Bollinger")
+            reasons.append("• Ціна нижче нижньої межі Bollinger")
         elif bb_high is not None and price > bb_high:
             score -= 1
-            reasons.append("Ціна вище верхньої межі Bollinger")
+            reasons.append("• Ціна вище верхньої межі Bollinger")
 
         # ADX
         if adx is not None and adx > 20:
             score += 1
-            reasons.append(f"Сильний тренд (ADX {adx:.1f})")
+            reasons.append(f"• Сильний тренд (ADX {adx:.1f})")
 
         # Рішення
         if score >= buy_threshold:
@@ -580,18 +586,17 @@ class CryptoTradingBot:
         message = f"""📊 {ticker} (4H)
         💰 Ціна: {analysis.price:.8f}
         Рекомендація: {analysis.recommendation}
+        """
 
-        🔎 Причина: {analysis.reasons}
+        if analysis.reasons:
+            message += "\n🔎 Аналіз:\n" + "\n".join(analysis.reasons)
 
-        🔍 Аналіз:
-        • {ma_trend}
-        • RSI: {analysis.rsi:.1f} ({rsi_interpretation})
-        • ₿ BTC тренд: {btc_trend}
-        • 📦 Об'єм: {volume_text}
+        message += f"""
+• ₿ BTC тренд: {btc_trend}
 
-        📏 Технічні рівні:
-        • 🔻 Підтримка: {analysis.support_level:.8f}
-        • 🔺 Опір: {analysis.resistance_level:.8f}"""
+📏 Технічні рівні:
+• 🔻 Підтримка: {analysis.support_level:.8f}
+• 🔺 Опір: {analysis.resistance_level:.8f}"""
 
         # Додаємо новини якщо є
         if news and news.sentiment != "❓ UNKNOWN":
@@ -717,6 +722,8 @@ class CryptoTradingBot:
             hold_count = 0
             wins = 0
             losses = 0
+            buy_points = []
+            sell_points = []
 
             for i in range(99, len(df)):
                 partial_df = df.iloc[:i+1].copy()
@@ -728,6 +735,7 @@ class CryptoTradingBot:
                     entry_price = analysis.price
                     position_open = True
                     buy_signals += 1
+                    buy_points.append((partial_df['timestamp'].iloc[-1], analysis.price))
 
                 elif analysis.recommendation == "❌ SELL" and position_open:
                     change = (analysis.price - entry_price) / entry_price * 100
@@ -738,6 +746,7 @@ class CryptoTradingBot:
                         losses += 1
                     sell_signals += 1
                     position_open = False
+                    sell_points.append((partial_df['timestamp'].iloc[-1], analysis.price))
 
                 else:
                     hold_count += 1
@@ -750,8 +759,55 @@ class CryptoTradingBot:
             summary += f"⏸️ HOLD: {hold_count}\n\n"
             summary += f"📈 Total return: {total_return:.2f}%\n"
             summary += f"🎯 Win rate: {winrate:.1f}%"
+            fig = go.Figure()
 
-            await update.message.reply_text(summary)
+            fig.add_trace(go.Candlestick(
+                x=df['timestamp'],
+                open=df['open'],
+                high=df['high'],
+                low=df['low'],
+                close=df['close'],
+                name='Price'
+            ))
+
+            if buy_points:
+                fig.add_trace(go.Scatter(
+                    x=[t for t, _ in buy_points],
+                    y=[p for _, p in buy_points],
+                    mode="markers",
+                    name="BUY",
+                    marker=dict(color="green", size=10, symbol="triangle-up")
+                ))
+
+            if sell_points:
+                fig.add_trace(go.Scatter(
+                    x=[t for t, _ in sell_points],
+                    y=[p for _, p in sell_points],
+                    mode="markers",
+                    name="SELL",
+                    marker=dict(color="red", size=10, symbol="triangle-down")
+                ))
+
+            fig.update_layout(
+                title=f"Backtest {ticker} ({period_str})",
+                xaxis_title="Time",
+                yaxis_title="Price (USDT)",
+                template="plotly_white",
+                width=900,
+                height=500
+            )
+
+            img_bytes = pio.to_image(fig, format="png")
+            bio = BytesIO(img_bytes)
+            bio.name = f"{ticker}_backtest.png"
+            bio.seek(0)
+
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=bio,
+                caption=summary
+            )
+            return
 
         except Exception as e:
             import logging
