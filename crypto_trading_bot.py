@@ -46,6 +46,7 @@ class TechnicalAnalysis:
     support_level: float = 0.0
     resistance_level: float = 0.0
     reasons: list = field(default_factory=list)
+    score: int = 0
 
 @dataclass
 class NewsAnalysis:
@@ -361,7 +362,7 @@ class CryptoTradingBot:
             trend = "➡️ SIDEWAYS"
 
         # Генеруємо рекомендацію
-        recommendation, reasons = self.generate_recommendation(
+        recommendation, score, reasons = self.generate_recommendation(
             latest['rsi'], trend, latest['volume_change'],
             latest['close'], support, resistance,
             macd=latest['macd'], macd_signal=latest['macd_signal'],
@@ -380,7 +381,8 @@ class CryptoTradingBot:
             trend=trend,
             support_level=support,
             resistance_level=resistance,
-            reasons=reasons
+            reasons=reasons,
+            score=score
         )
 
     def generate_recommendation(self, rsi, trend, volume_change, price, support, resistance,
@@ -392,74 +394,74 @@ class CryptoTradingBot:
         # RSI
         if rsi < 30:
             score += 2
-            reasons.append(f"• RSI {rsi:.1f} → перепроданість")
+            reasons.append(f"• RSI {rsi:.1f} → перепроданість | +2")
         elif rsi > 70:
             score -= 2
-            reasons.append(f"• RSI {rsi:.1f} → перекупленість")
+            reasons.append(f"• RSI {rsi:.1f} → перекупленість | -2")
         elif 30 <= rsi <= 50:
             score += 1
-            reasons.append(f"• RSI {rsi:.1f} → помірний бичачий сигнал")
+            reasons.append(f"• RSI {rsi:.1f} → помірний бичачий сигнал | +1")
         else:
             score += 1
-            reasons.append(f"• RSI {rsi:.1f} → нейтральна зона")
+            reasons.append(f"• RSI {rsi:.1f} → нейтральна зона | +1")
 
         # Trend
         if "UP" in trend:
             score += 2
-            reasons.append("• Тренд спрямований вгору (MA7 > MA25 > MA99)")
+            reasons.append("• Тренд спрямований вгору (MA7 > MA25 > MA99) | +2")
         elif "DOWN" in trend:
             score -= 2
-            reasons.append("• Тренд спрямований вниз (MA7 < MA25 < MA99)")
+            reasons.append("• Тренд спрямований вниз (MA7 < MA25 < MA99) | -2")
 
         # Volume
         if volume_change > 10:
             score += 1
-            reasons.append(f"📦 Обʼєм зростає ({volume_change:.1f}%)")
+            reasons.append(f"📦 Обʼєм зростає ({volume_change:.1f}%) | +1")
         elif volume_change < -10:
             score -= 1
-            reasons.append(f"📦 Обʼєм падає ({abs(volume_change):.1f}%)")
+            reasons.append(f"📦 Обʼєм падає ({abs(volume_change):.1f}%) | -1")
 
         # Support/resistance
         if support > 0 and resistance > 0:
             position = (price - support) / (resistance - support)
             if position < 0.2:
                 score += 1
-                reasons.append("• Ціна біля рівня підтримки")
+                reasons.append("• Ціна біля рівня підтримки | +1")
             elif position > 0.8:
                 score -= 1
-                reasons.append("• Ціна біля рівня опору")
+                reasons.append("• Ціна біля рівня опору | -1")
 
         # MACD
         if macd is not None and macd_signal is not None:
             if macd > macd_signal:
                 score += 1
-                reasons.append("• MACD перетнув сигнал вгору")
+                reasons.append("• MACD перетнув сигнал вгору | +1")
             elif macd < macd_signal:
                 score -= 1
-                reasons.append("• MACD перетнув сигнал вниз")
+                reasons.append("• MACD перетнув сигнал вниз | -1")
 
         # Bollinger Bands
         if bb_low is not None and price < bb_low:
             score += 1
-            reasons.append("• Ціна нижче нижньої межі Bollinger")
+            reasons.append("• Ціна нижче нижньої межі Bollinger | +1")
         elif bb_high is not None and price > bb_high:
             score -= 1
-            reasons.append("• Ціна вище верхньої межі Bollinger")
+            reasons.append("• Ціна вище верхньої межі Bollinger | -1")
 
         # ADX
         if adx is not None and adx > 20:
             score += 1
-            reasons.append(f"• Сильний тренд (ADX {adx:.1f})")
+            reasons.append(f"• Сильний тренд (ADX {adx:.1f}) | +1")
 
         # Рішення
         if score >= buy_threshold:
-            recommendation = "✅ BUY"
+            return "✅ BUY", score, reasons
         elif score <= sell_threshold:
-            recommendation = "❌ SELL"
+            return "❌ SELL", score, reasons
         else:
-            recommendation = "⏸️ HOLD"
+            return "⏸️ HOLD", score, reasons
 
-        return recommendation, reasons
+        # return recommendation, reasons
 
     async def analyze_btc_trend(self) -> str:
         """Аналізує тренд BTC як додатковий фільтр"""
@@ -556,7 +558,8 @@ class CryptoTradingBot:
             )
 
     def format_analysis_message(self, ticker: str, analysis: TechnicalAnalysis,
-                              btc_trend: str = "", news: NewsAnalysis = None) -> str:
+                            btc_trend: str = "", news: NewsAnalysis = None,
+                            buy_threshold: int = 3, sell_threshold: int = -3) -> str:
         """Форматує повідомлення з результатами аналізу"""
 
         # Визначаємо тренд MA
@@ -583,9 +586,18 @@ class CryptoTradingBot:
         else:
             volume_text = f"стабільний ({analysis.volume_change:.1f}%)"
 
+        if buy_threshold <= 2:
+            strategy_type = "🔵 Агресивна"
+        elif buy_threshold >= 5:
+            strategy_type = "🔴 Консервативна"
+        else:
+            strategy_type = "🟡 Збалансована"
+
         message = f"""📊 {ticker} (4H)
         💰 Ціна: {analysis.price:.8f}
         Рекомендація: {analysis.recommendation}
+        📊 Score: {analysis.score}
+        ⚙️ Стратегія: {strategy_type}
         """
 
         if analysis.reasons:
@@ -711,8 +723,8 @@ class CryptoTradingBot:
                 return
 
             settings = self.get_user_settings(user_id)
-            buy_th = settings.get('buy_threshold', 3)
-            sell_th = settings.get('sell_threshold', -3)
+            buy_threshold = settings.get('buy_threshold', 3)
+            sell_threshold = settings.get('sell_threshold', -3)
 
             position_open = False
             entry_price = 0.0
@@ -727,7 +739,7 @@ class CryptoTradingBot:
 
             for i in range(99, len(df)):
                 partial_df = df.iloc[:i+1].copy()
-                analysis = self.calculate_technical_indicators(partial_df, buy_th, sell_th)
+                analysis = self.calculate_technical_indicators(partial_df, buy_threshold, sell_th)
                 if not analysis:
                     continue
 
@@ -885,8 +897,8 @@ class CryptoTradingBot:
         """Обробляє команду /analyze"""
         user_id = update.effective_user.id
         settings = self.get_user_settings(user_id)
-        buy_th = settings.get('buy_threshold', 3)
-        sell_th = settings.get('sell_threshold', -3)
+        buy_threshold = settings.get('buy_threshold', 3)
+        sell_threshold = settings.get('sell_threshold', -3)
 
         if not context.args:
             settings = self.get_user_settings(user_id)
@@ -910,7 +922,7 @@ class CryptoTradingBot:
                 return
 
             # Технічний аналіз
-            analysis = self.calculate_technical_indicators(df, buy_th, sell_th)
+            analysis = self.calculate_technical_indicators(df, buy_threshold, sell_threshold)
             if not analysis:
                 await update.message.reply_text("❌ Недостатньо даних для аналізу")
                 return
@@ -928,7 +940,7 @@ class CryptoTradingBot:
             trend_changed = self.check_trend_changes(user_id, ticker, analysis.trend)
 
             # Формування повідомлення
-            message = self.format_analysis_message(ticker, analysis, btc_trend, news)
+            message = self.format_analysis_message(ticker, analysis, btc_trend, news, buy_threshold, sell_threshold)
 
             if trend_changed:
                 message += "\n\n⚠️ Зміна тренду виявлена!"
@@ -975,7 +987,8 @@ class CryptoTradingBot:
         """Обробляє команду /watchlist"""
         user_id = update.effective_user.id
         settings = self.get_user_settings(user_id)
-
+        buy_threshold = settings.get('buy_threshold', 3)
+        sell_threshold = settings.get('sell_threshold', -3)
         current_ticker = settings.get('ticker', 'Не встановлено')
         interval = settings.get('interval_hours', 4)
         alerts_enabled = settings.get('alerts_enabled', True)
@@ -983,10 +996,20 @@ class CryptoTradingBot:
 
         status = "✅ Увімкнено" if alerts_enabled else "❌ Вимкнено"
 
+        if buy_threshold <= 2:
+            strategy_type = "🔵 Агресивні"
+        elif buy_threshold >= 5:
+            strategy_type = "🔴 Консервативні"
+        else:
+            strategy_type = "🟡 Збалансовані"
+
         message = f"""📋 Поточні налаштування:
 🎯 Основний тікер: {current_ticker}
 ⏰ Інтервал: {interval}h
 🔔 Сповіщення: {status}
+🎯 Пороги сигналів ({strategy_type}):
+    • BUY threshold: {buy_threshold}
+    • SELL threshold: {sell_threshold}
 
 📋 Список відстеження:"""
 
@@ -1090,8 +1113,8 @@ class CryptoTradingBot:
         """Планує автоматичний аналіз"""
         job_id = f"analysis_{user_id}"
         settings = self.get_user_settings(user_id)
-        buy_th = settings.get('buy_threshold', 3)
-        sell_th = settings.get('sell_threshold', -3)
+        buy_threshold = settings.get('buy_threshold', 3)
+        sell_threshold = settings.get('sell_threshold', -3)
 
         # Видаляємо існуючий job якщо є
         if self.scheduler.get_job(job_id):
@@ -1124,11 +1147,11 @@ class CryptoTradingBot:
             if df.empty:
                 return
 
-            buy_th = settings.get('buy_threshold', 3)
-            sell_th = settings.get('sell_threshold', -3)
+            buy_threshold = settings.get('buy_threshold', 3)
+            sell_threshold = settings.get('sell_threshold', -3)
 
             # Технічний аналіз
-            analysis = self.calculate_technical_indicators(df, buy_th, sell_th)
+            analysis = self.calculate_technical_indicators(df, buy_threshold, sell_threshold)
             if not analysis:
                 return
 
