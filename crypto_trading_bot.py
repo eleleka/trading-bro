@@ -461,7 +461,20 @@ class CryptoTradingBot:
         else:
             return "⏸️ HOLD", score, reasons
 
-        # return recommendation, reasons
+
+    async def analyze_btc_trend(self) -> Tuple[str, Optional[float]]:
+        try:
+            btc_df = await self.get_crypto_data('BTC/USDT', '4h', 50)
+            if btc_df.empty:
+                return "❓ BTC UNKNOWN", None
+
+            btc_analysis = self.calculate_technical_indicators(btc_df)
+            if btc_analysis:
+                return btc_analysis.trend, btc_analysis.price
+            return "❓ BTC UNKNOWN", None
+        except Exception as e:
+            logger.error(f"Помилка аналізу BTC: {e}")
+            return "❓ BTC UNKNOWN", None
 
     async def analyze_btc_trend(self) -> str:
         """Аналізує тренд BTC як додатковий фільтр"""
@@ -477,7 +490,7 @@ class CryptoTradingBot:
                 return "❓ BTC UNKNOWN"
 
             logger.info(f"BTC тренд визначено: {btc_analysis.trend}")
-            return btc_analysis.trend
+            return btc_analysis.trend, btc_analysis.price
         except Exception as e:
             logger.error(f"❌ Помилка аналізу BTC: {e}")
             return "❓ BTC UNKNOWN"
@@ -559,7 +572,8 @@ class CryptoTradingBot:
 
     def format_analysis_message(self, ticker: str, analysis: TechnicalAnalysis,
                             btc_trend: str = "", news: NewsAnalysis = None,
-                            buy_threshold: int = 3, sell_threshold: int = -3) -> str:
+                            buy_threshold: int = 3, sell_threshold: int = -3,
+                            btc_price: float = None) -> str:
         """Форматує повідомлення з результатами аналізу"""
 
         # Визначаємо тренд MA
@@ -604,7 +618,7 @@ class CryptoTradingBot:
             message += "\n🔎 Аналіз:\n" + "\n".join(analysis.reasons)
 
         message += f"""
-• ₿ BTC тренд: {btc_trend}
+• ₿ BTC тренд: {btc_trend} {f'(${btc_price:,.2f})' if btc_price else ''}
 
 📏 Технічні рівні:
 • 🔻 Підтримка: {analysis.support_level:.8f}
@@ -928,7 +942,7 @@ class CryptoTradingBot:
                 return
 
             # Аналіз BTC
-            btc_trend = await self.analyze_btc_trend()
+            btc_trend, btc_price = await self.analyze_btc_trend()
 
             # Новини
             news = await self.get_crypto_news()
@@ -940,7 +954,7 @@ class CryptoTradingBot:
             trend_changed = self.check_trend_changes(user_id, ticker, analysis.trend)
 
             # Формування повідомлення
-            message = self.format_analysis_message(ticker, analysis, btc_trend, news, buy_threshold, sell_threshold)
+            message = self.format_analysis_message(ticker, analysis, btc_trend, news, buy_threshold, sell_threshold, btc_price=btc_price)
 
             if trend_changed:
                 message += "\n\n⚠️ Зміна тренду виявлена!"
@@ -1156,7 +1170,7 @@ class CryptoTradingBot:
                 return
 
             # Аналіз BTC
-            btc_trend = await self.analyze_btc_trend()
+            btc_trend, btc_price = await self.analyze_btc_trend()
 
             # Новини
             news = await self.get_crypto_news()
