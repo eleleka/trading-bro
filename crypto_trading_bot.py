@@ -90,6 +90,21 @@ class CryptoTradingBot:
         # Telegram application
         self.application = None
 
+    async def settimeframe_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        if not context.args:
+            await update.message.reply_text("❌ Вкажіть таймфрейм. Наприклад: /settimeframe 1h")
+            return
+
+        timeframe = context.args[0].lower()
+        allowed = ['15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d']
+        if timeframe not in allowed:
+            await update.message.reply_text(f"❌ Неправильний таймфрейм. Доступні: {', '.join(allowed)}")
+            return
+
+        self.update_user_settings(user_id, timeframe=timeframe)
+        await update.message.reply_text(f"✅ Таймфрейм встановлено: {timeframe}")
+
     def generate_chart(self, df: pd.DataFrame, analysis: TechnicalAnalysis, ticker: str) -> BytesIO:
         """Генерує графік з ціною, MA, рівнями підтримки та опору"""
         import matplotlib.pyplot as plt
@@ -169,6 +184,21 @@ class CryptoTradingBot:
             )
         ''')
 
+        try:
+            cursor.execute("ALTER TABLE user_settings ADD COLUMN buy_threshold INTEGER DEFAULT 3")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE user_settings ADD COLUMN sell_threshold INTEGER DEFAULT -3")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE user_settings ADD COLUMN timeframe TEXT DEFAULT '4h'")
+        except sqlite3.OperationalError:
+            pass
+
         conn.commit()
         conn.close()
 
@@ -178,7 +208,8 @@ class CryptoTradingBot:
         cursor = conn.cursor()
 
         cursor.execute('''
-            SELECT ticker, interval_hours, alerts_enabled, chat_id, watchlist, buy_threshold, sell_threshold
+            SELECT ticker, interval_hours, alerts_enabled, chat_id, watchlist,
+                buy_threshold, sell_threshold, timeframe
             FROM user_settings WHERE user_id = ?
         ''', (user_id,))
 
@@ -193,6 +224,7 @@ class CryptoTradingBot:
                 'alerts_enabled': result[2],
                 'chat_id': result[3],
                 'watchlist': json.loads(result[4]) if result[4] else [],
+                'timeframe': result[5] if result[5] else '4h',
                 'buy_threshold': result[5] if result[5] is not None else 3,
                 'sell_threshold': result[6] if result[6] is not None else -3
             }
@@ -559,7 +591,8 @@ class CryptoTradingBot:
 
     def format_analysis_message(self, ticker: str, analysis: TechnicalAnalysis,
                             btc_trend: str = "", news: NewsAnalysis = None,
-                            buy_threshold: int = 3, sell_threshold: int = -3) -> str:
+                            buy_threshold: int = 3, sell_threshold: int = -3,
+                            timeframe: str = '4h') -> str:
         """Форматує повідомлення з результатами аналізу"""
 
         # Визначаємо тренд MA
@@ -593,7 +626,7 @@ class CryptoTradingBot:
         else:
             strategy_type = "🟡 Збалансована"
 
-        message = f"""📊 {ticker} (4H)
+        message = f"""📊 {ticker} ({timeframe})
         💰 Ціна: {analysis.price:.8f}
         Рекомендація: {analysis.recommendation}
         📊 Score: {analysis.score}
@@ -669,6 +702,7 @@ class CryptoTradingBot:
 /setticker PEPEUSDT - встановити тікер для моніторингу
 /analyze PEPEUSDT - миттєвий аналіз
 /setinterval 2h - змінити інтервал перевірки
+/settimeframe <TF> — змінити таймфрейм для аналізу графіка
 /watchlist - список відстежуваних тікерів
 /enablealerts - увімкнути автоматичні сповіщення
 /disablealerts - вимкнути автоматичні сповіщення
@@ -841,6 +875,10 @@ class CryptoTradingBot:
    Приклад: /setinterval 2h
    Доступні: 1h, 2h, 4h, 8h, 12h, 24h
 
+📉 /settimeframe <TF> — змінити таймфрейм для аналізу графіка
+   Приклад: /settimeframe 1h
+   Доступні: 15m, 1h, 2h, 4h, 1d
+
 📋 /watchlist - показати поточні налаштування
 
 🔔 /enablealerts - увімкнути автоматичні сповіщення
@@ -899,6 +937,7 @@ class CryptoTradingBot:
         settings = self.get_user_settings(user_id)
         buy_threshold = settings.get('buy_threshold', 3)
         sell_threshold = settings.get('sell_threshold', -3)
+        timeframe = settings.get("timeframe", "4h")
 
         if not context.args:
             settings = self.get_user_settings(user_id)
@@ -916,7 +955,7 @@ class CryptoTradingBot:
 
         try:
             # Отримуємо дані
-            df = await self.get_crypto_data(ticker, '4h', 100)
+            df = await self.get_crypto_data(ticker, timeframe, 100)
             if df.empty:
                 await update.message.reply_text("❌ Не вдалося отримати дані")
                 return
@@ -940,7 +979,7 @@ class CryptoTradingBot:
             trend_changed = self.check_trend_changes(user_id, ticker, analysis.trend)
 
             # Формування повідомлення
-            message = self.format_analysis_message(ticker, analysis, btc_trend, news, buy_threshold, sell_threshold)
+            message = self.format_analysis_message(ticker, analysis, btc_trend, news, buy_threshold, sell_threshold, timeframe=timeframe)
 
             if trend_changed:
                 message += "\n\n⚠️ Зміна тренду виявлена!"
@@ -993,6 +1032,7 @@ class CryptoTradingBot:
         interval = settings.get('interval_hours', 4)
         alerts_enabled = settings.get('alerts_enabled', True)
         watchlist = settings.get('watchlist', [])
+        timeframe = settings.get('timeframe', '4h')
 
         status = "✅ Увімкнено" if alerts_enabled else "❌ Вимкнено"
 
@@ -1138,12 +1178,14 @@ class CryptoTradingBot:
             if not settings.get('alerts_enabled', True):
                 return
 
+            timeframe = settings.get('timeframe', '4h')
+
             chat_id = settings.get('chat_id')
             if not chat_id:
                 return
 
             # Отримуємо дані
-            df = await self.get_crypto_data(ticker, '4h', 100)
+            df = await self.get_crypto_data(ticker, timeframe, 100)
             if df.empty:
                 return
 
@@ -1207,6 +1249,7 @@ class CryptoTradingBot:
             self.application.add_handler(CommandHandler("disablealerts", self.disablealerts_command))
             self.application.add_handler(CommandHandler("setscore", self.setscore_command))
             self.application.add_handler(CommandHandler("backtest", self.backtest_command))
+            self.application.add_handler(CommandHandler("settimeframe", self.settimeframe_command))
 
             # Реєструємо обробники callback запитів
             self.application.add_handler(CallbackQueryHandler(self.callback_query_handler))
