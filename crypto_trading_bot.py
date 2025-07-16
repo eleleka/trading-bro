@@ -224,7 +224,7 @@ class CryptoTradingBot:
                 'alerts_enabled': result[2],
                 'chat_id': result[3],
                 'watchlist': json.loads(result[4]) if result[4] else [],
-                'timeframe': result[5] if result[5] else '4h',
+                'timeframe': result[7] if result[7] else '4h',
                 'buy_threshold': result[5] if result[5] is not None else 3,
                 'sell_threshold': result[6] if result[6] is not None else -3
             }
@@ -271,6 +271,10 @@ class CryptoTradingBot:
         """Додає тікер до списку відстеження"""
         settings = self.get_user_settings(user_id)
         watchlist = settings.get('watchlist', [])
+
+        # Обмеження на кількість тікерів
+        if len(watchlist) >= 10:
+            return False
 
         if ticker not in watchlist:
             watchlist.append(ticker)
@@ -426,16 +430,16 @@ class CryptoTradingBot:
         # RSI
         if rsi < 30:
             score += 2
-            reasons.append(f"• RSI {rsi:.1f} → перепроданість | +2")
+            reasons.append(f"• RSI {rsi:.1f} → перепроданість, потенційне зростання ціни | +2")
         elif rsi > 70:
             score -= 2
-            reasons.append(f"• RSI {rsi:.1f} → перекупленість | -2")
+            reasons.append(f"• RSI {rsi:.1f} → перекупленість, ціна активу зросла надто швидко і, можливо, надмірно, і існує ймовірність зниження ціни. | -2")
         elif 30 <= rsi <= 50:
-            score += 1
-            reasons.append(f"• RSI {rsi:.1f} → помірний бичачий сигнал | +1")
+            score -= 1
+            reasons.append(f"• RSI {rsi:.1f} → помірний ведмежий сигнал | -1")
         else:
             score += 1
-            reasons.append(f"• RSI {rsi:.1f} → нейтральна зона | +1")
+            reasons.append(f"• RSI {rsi:.1f} → помірний бичачий сигнал | +1")
 
         # Trend
         if "UP" in trend:
@@ -444,6 +448,8 @@ class CryptoTradingBot:
         elif "DOWN" in trend:
             score -= 2
             reasons.append("• Тренд спрямований вниз (MA7 < MA25 < MA99) | -2")
+        else:
+            reasons.append("• Боковий тренд | 0")
 
         # Volume
         if volume_change > 10:
@@ -452,6 +458,8 @@ class CryptoTradingBot:
         elif volume_change < -10:
             score -= 1
             reasons.append(f"📦 Обʼєм падає ({abs(volume_change):.1f}%) | -1")
+        else:
+            reasons.append(f"📦 Обʼєм стабільний ({volume_change:.1f}%) | 0")
 
         # Support/resistance
         if support > 0 and resistance > 0:
@@ -462,6 +470,8 @@ class CryptoTradingBot:
             elif position > 0.8:
                 score -= 1
                 reasons.append("• Ціна біля рівня опору | -1")
+            else:
+                reasons.append("• Ціна в середині діапазону | 0")
 
         # MACD
         if macd is not None and macd_signal is not None:
@@ -481,9 +491,19 @@ class CryptoTradingBot:
             reasons.append("• Ціна вище верхньої межі Bollinger | -1")
 
         # ADX
-        if adx is not None and adx > 20:
+        if adx is not None and 25 <= adx <= 50:
             score += 1
-            reasons.append(f"• Сильний тренд (ADX {adx:.1f}) | +1")
+            reasons.append(f"• Сильний тренд, рекомендується слідувати тренду (ADX {adx:.1f}) | +1")
+        elif adx is not None and 50 <= adx <= 75:
+            score += 2
+            reasons.append(f"• Дуже сильний тренд, рекомендується слідувати тренду (ADX {adx:.1f}) | +2")
+        elif adx is not None and adx > 75:
+            score += 2
+            reasons.append(f"• Неймовірно сильний тренд (рідкість) (ADX {adx:.1f}) | +2")
+        elif adx is not None and 20 <= adx <= 25:
+            reasons.append(f"• Початок тренду, але ще не дуже сильний (ADX {adx:.1f}) | 0")
+        elif adx is not None and adx < 20:
+            reasons.append(f"• Дуже слабкий тренд, ринок може бути в діапазоні флет (ADX {adx:.1f}) | 0")
 
         # Рішення
         if score >= buy_threshold:
@@ -498,21 +518,34 @@ class CryptoTradingBot:
     async def analyze_btc_trend(self) -> str:
         """Аналізує тренд BTC як додатковий фільтр"""
         try:
-            btc_df = await self.get_crypto_data('BTCUSDT', '4h', 100)
+            btc_df = await self.get_crypto_data('BTC/USDT', '4h', 100)
             if btc_df.empty:
-                logger.warning("⚠️ BTCUSDT: отримано порожній DataFrame")
+                logger.warning("⚠️ BTC/USDT: отримано порожній DataFrame")
                 return "❓ BTC UNKNOWN"
 
             btc_analysis = self.calculate_technical_indicators(btc_df)
             if not btc_analysis:
-                logger.warning("⚠️ BTCUSDT: не вдалося обчислити технічні індикатори")
+                logger.warning("⚠️ BTC/USDT: не вдалося обчислити технічні індикатори")
                 return "❓ BTC UNKNOWN"
 
             logger.info(f"BTC тренд визначено: {btc_analysis.trend}")
             return btc_analysis.trend
         except Exception as e:
             logger.error(f"❌ Помилка аналізу BTC: {e}")
-            return "❓ BTC UNKNOWN"
+            # Спробуємо з іншим форматом
+            try:
+                btc_df = await self.get_crypto_data('BTCUSDT', '4h', 100)
+                if btc_df.empty:
+                    return "❓ BTC UNKNOWN"
+
+                btc_analysis = self.calculate_technical_indicators(btc_df)
+                if not btc_analysis:
+                    return "❓ BTC UNKNOWN"
+
+                return btc_analysis.trend
+            except Exception as e2:
+                logger.error(f"❌ Друга спроба аналізу BTC: {e2}")
+                return "❓ BTC UNKNOWN"
 
     async def get_crypto_news(self) -> NewsAnalysis:
         """Отримує та аналізує новини про криптовалюти"""
@@ -627,7 +660,7 @@ class CryptoTradingBot:
             strategy_type = "🟡 Збалансована"
 
         message = f"""📊 {ticker} ({timeframe})
-        💰 Ціна: {analysis.price:.8f}
+        💰 Ціна: {analysis.price:.8f} USDT
         Рекомендація: {analysis.recommendation}
         📊 Score: {analysis.score}
         ⚙️ Стратегія: {strategy_type}
@@ -679,13 +712,18 @@ class CryptoTradingBot:
         """Перевіряє валідність тікера"""
         try:
             # Перевіряємо формат тікера
-            if not re.match(r'^[A-Z0-9]{3,10}USDT$', ticker.upper()):
+            if not ticker or len(ticker) < 6:
+                return False
+
+            ticker_upper = ticker.upper()
+            if not re.match(r'^[A-Z0-9]{3,10}USDT$', ticker_upper):
                 return False
 
             # Перевіряємо наявність на біржі
-            ticker_info = self.exchange.fetch_ticker(ticker.upper())
+            ticker_info = self.exchange.fetch_ticker(ticker_upper)
             return ticker_info is not None
-        except:
+        except Exception as e:
+            logger.error(f"Помилка валідації тікера {ticker}: {e}")
             return False
 
     # Telegram команди
@@ -773,7 +811,7 @@ class CryptoTradingBot:
 
             for i in range(99, len(df)):
                 partial_df = df.iloc[:i+1].copy()
-                analysis = self.calculate_technical_indicators(partial_df, buy_threshold, sell_th)
+                analysis = self.calculate_technical_indicators(partial_df, buy_threshold, sell_threshold)
                 if not analysis:
                     continue
 
@@ -986,7 +1024,10 @@ class CryptoTradingBot:
 
             # Генеруємо графік
             chart = self.generate_chart(df, analysis, ticker)
-            await update.message.reply_photo(photo=chart)
+            if chart.getvalue():  # Перевіряємо чи не порожній графік
+                await update.message.reply_photo(photo=chart)
+            else:
+                message += "\n\n⚠️ Графік недоступний"
 
             # Відправляємо повідомлення з аналізом
             await update.message.reply_text(message)
@@ -994,6 +1035,14 @@ class CryptoTradingBot:
         except Exception as e:
             logger.error(f"Помилка аналізу: {e}")
             await update.message.reply_text("❌ Помилка під час аналізу")
+        except ccxt.NetworkError as e:
+            logger.error(f"Мережева помилка: {e}")
+            await update.message.reply_text("❌ Проблема з мережею. Спробуйте пізніше.")
+            return
+        except ccxt.ExchangeError as e:
+            logger.error(f"Помилка біржі: {e}")
+            await update.message.reply_text("❌ Помилка біржі. Перевірте тікер.")
+            return
 
     async def setinterval_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обробляє команду /setinterval"""
@@ -1179,14 +1228,16 @@ class CryptoTradingBot:
                 return
 
             timeframe = settings.get('timeframe', '4h')
-
             chat_id = settings.get('chat_id')
+
             if not chat_id:
+                logger.warning(f"Відсутній chat_id для користувача {user_id}")
                 return
 
             # Отримуємо дані
             df = await self.get_crypto_data(ticker, timeframe, 100)
             if df.empty:
+                logger.warning(f"Порожні дані для {ticker}")
                 return
 
             buy_threshold = settings.get('buy_threshold', 3)
@@ -1195,6 +1246,7 @@ class CryptoTradingBot:
             # Технічний аналіз
             analysis = self.calculate_technical_indicators(df, buy_threshold, sell_threshold)
             if not analysis:
+                logger.warning(f"Не вдалося проаналізувати {ticker}")
                 return
 
             # Аналіз BTC
@@ -1211,7 +1263,7 @@ class CryptoTradingBot:
 
             # Формування повідомлення
             message = f"🔄 Автоматичний аналіз\n\n"
-            message += self.format_analysis_message(ticker, analysis, btc_trend, news)
+            message += self.format_analysis_message(ticker, analysis, btc_trend, news, buy_threshold, sell_threshold, timeframe)
 
             if trend_changed:
                 message += "\n\n⚠️ Зміна тренду виявлена!"
@@ -1224,13 +1276,14 @@ class CryptoTradingBot:
 
             # Генеруємо та відправляємо графік
             chart = self.generate_chart(df, analysis, ticker)
-            await self.application.bot.send_photo(chat_id=chat_id, photo=chart)
+            if chart.getvalue():  # Перевіряємо чи не порожній графік
+                await self.application.bot.send_photo(chat_id=chat_id, photo=chart)
 
             # Відправляємо повідомлення
             await self.application.bot.send_message(chat_id=chat_id, text=message)
 
         except Exception as e:
-            logger.error(f"Помилка запланованого аналізу: {e}")
+            logger.error(f"Помилка запланованого аналізу для {user_id}/{ticker}: {e}")
 
     def run_bot(self):
         """Запускає бота"""
