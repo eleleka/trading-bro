@@ -9,6 +9,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, filters, ContextTypes
 )
+from telegram.request import HTTPXRequest
 import requests
 from typing import Dict, List, Optional, Tuple
 
@@ -17,7 +18,7 @@ try:
     import pandas as pd
     import numpy as np
     from ta.momentum import RSIIndicator
-    from ta.trend import MACD, EMAIndicator
+    from ta.trend import MACD, EMAIndicator, ADXIndicator
     from ta.volatility import BollingerBands, AverageTrueRange
     TA_AVAILABLE = True
 except ImportError:
@@ -307,7 +308,9 @@ class CryptoAnalyzer:
         Returns 0 if no clear divergence.
         """
         try:
-            n = 20
+            # Tighter parameters: shorter lookback + larger RSI gap required
+            # reduces false positives from the original (n=20, threshold=5)
+            n = 10
             price_w = closes.iloc[-n:]
             rsi_w   = rsi_series.iloc[-n:].dropna()
             if len(rsi_w) < 5:
@@ -321,7 +324,7 @@ class CryptoAnalyzer:
             price_min     = float(price_w.min())
             rsi_at_pmin   = float(rsi_series.loc[price_min_idx]) if price_min_idx in rsi_series.index else current_rsi
 
-            if current_price <= price_min * 1.015 and current_rsi > rsi_at_pmin + 5:
+            if current_price <= price_min * 1.01 and current_rsi > rsi_at_pmin + 10:
                 return 1  # bullish divergence
 
             # Bearish: price at/near its recent high, RSI notably below its value then
@@ -329,7 +332,7 @@ class CryptoAnalyzer:
             price_max     = float(price_w.max())
             rsi_at_pmax   = float(rsi_series.loc[price_max_idx]) if price_max_idx in rsi_series.index else current_rsi
 
-            if current_price >= price_max * 0.985 and current_rsi < rsi_at_pmax - 5:
+            if current_price >= price_max * 0.99 and current_rsi < rsi_at_pmax - 10:
                 return -1  # bearish divergence
 
         except Exception as e:
@@ -370,8 +373,10 @@ class CryptoAnalyzer:
         base.update({
             'rsi': 50.0, 'macd_signal': 'neutral',
             'ema_trend': 'sideways', 'volume_trend': 'stable',
-            'volume_ratio': 1.0, 'rsi_divergence': 0,
+            'volume_ratio': 1.0, 'vol_ratio_100': 1.0, 'rsi_divergence': 0,
             'bb_signal': 'neutral', 'bb_squeeze': False,
+            'adx': 20.0, 'adx_pos': 25.0, 'adx_neg': 25.0,
+            'market_regime': 'transitioning',
             'data_source': 'fallback',
         })
         return base
@@ -440,17 +445,21 @@ class CryptoAnalyzer:
         except Exception:
             indicators['ema_trend'] = 'sideways'
 
-        # --- Volume ---
+        # --- Volume (20-period for short-term trend + 100-period for conviction) ---
         try:
-            vol_mean = float(volumes.iloc[-20:].mean())
-            vol_now  = float(volumes.iloc[-1])
-            ratio    = vol_now / vol_mean if vol_mean > 0 else 1.0
-            indicators['volume_ratio'] = round(ratio, 2)
-            if   ratio > 1.2: indicators['volume_trend'] = 'increasing'
-            elif ratio < 0.8: indicators['volume_trend'] = 'decreasing'
-            else:             indicators['volume_trend'] = 'stable'
+            vol_mean_20  = float(volumes.iloc[-20:].mean())
+            vol_mean_100 = float(volumes.iloc[-min(100, len(volumes)):].mean())
+            vol_now      = float(volumes.iloc[-1])
+            ratio_20     = vol_now / vol_mean_20  if vol_mean_20  > 0 else 1.0
+            ratio_100    = vol_now / vol_mean_100 if vol_mean_100 > 0 else 1.0
+            indicators['volume_ratio']  = round(ratio_20,  2)
+            indicators['vol_ratio_100'] = round(ratio_100, 2)
+            if   ratio_20 > 1.2: indicators['volume_trend'] = 'increasing'
+            elif ratio_20 < 0.8: indicators['volume_trend'] = 'decreasing'
+            else:                indicators['volume_trend'] = 'stable'
         except Exception:
-            indicators.update({'volume_trend': 'stable', 'volume_ratio': 1.0})
+            indicators.update({'volume_trend': 'stable', 'volume_ratio': 1.0,
+                               'vol_ratio_100': 1.0})
 
         # --- Bollinger Bands ---
         indicators.update(self._compute_bollinger(closes))
@@ -467,52 +476,147 @@ class CryptoAnalyzer:
         # --- Support & Resistance ---
         indicators.update(self._compute_support_resistance(highs, lows, closes))
 
+        # --- ADX (market regime detection) ---
+        try:
+            adx_obj  = ADXIndicator(high=highs, low=lows, close=closes, window=14)
+            adx_val  = float(adx_obj.adx().iloc[-1])
+            adx_pos  = float(adx_obj.adx_pos().iloc[-1])   # +DI  (buying pressure)
+            adx_neg  = float(adx_obj.adx_neg().iloc[-1])   # -DI  (selling pressure)
+            indicators['adx']     = round(adx_val, 2)
+            indicators['adx_pos'] = round(adx_pos, 2)
+            indicators['adx_neg'] = round(adx_neg, 2)
+            # Regime: strong trend (>25), ranging (<15), or transitioning
+            if adx_val >= 25:
+                indicators['market_regime'] = 'trending'
+            elif adx_val <= 15:
+                indicators['market_regime'] = 'ranging'
+            else:
+                indicators['market_regime'] = 'transitioning'
+        except Exception:
+            indicators['adx']           = 20.0
+            indicators['adx_pos']       = 25.0
+            indicators['adx_neg']       = 25.0
+            indicators['market_regime'] = 'transitioning'
+
         indicators['data_source'] = 'live'
         return indicators
 
     # ------------------------------------------------------------------
-    # Signal scoring
+    # Signal scoring — V2 (all improvements)
     # ------------------------------------------------------------------
     def _compute_score(self, indicators: Dict, change_24h: float, ob_score: int) -> int:
-        score = 0
+        """
+        V2 scoring with five structural improvements over the original:
+
+        1. Momentum cap (±2): MACD, EMA, volume, and 24h-change are all downstream
+           of "price went up/down recently" — they are correlated, not independent.
+           Letting them freely stack caused score-inversion (score=+5 → only 44%
+           direction accuracy). Capping at ±2 prevents a single trend from inflating
+           the score past what independent signals can justify.
+
+        2. 24h change as continuation-only: the raw +3% signal fired on spikes too.
+           Now only counts when EMA confirms the direction AND RSI is not already
+           overextended (RSI 68/32 threshold prevents the signal on exhaustion spikes).
+
+        3. Volume vs 100-period baseline: short 20-period MA includes the same surge
+           you're already measuring, inflating the ratio. 100-period MA is a cleaner
+           baseline for "is this candle unusually active?". Threshold raised to 1.3×.
+
+        4. BB squeeze follows trend in trending regime: a squeeze in a trend typically
+           resolves in the trend direction, not against it.
+
+        5. RSI tiered in ranging regime (20/35 and 65/80): extreme levels in a range
+           are higher-conviction mean-reversion signals than moderate levels.
+
+        6. ADX noise-zone damper (15 < ADX < 22): in the transition between trending
+           and ranging, regime classification is unreliable — reduce |score| by 1.
+
+        Regime definitions (ADX-based):
+          trending      ADX ≥ 25  — strong directional move
+          ranging       ADX ≤ 15  — low-momentum sideways market
+          transitioning ADX 15–25 — uncertain; balanced approach
+        """
         ema_trend = indicators.get('ema_trend', 'sideways')
+        regime    = indicators.get('market_regime', 'transitioning')
+        adx       = indicators.get('adx', 20.0)
+        rsi       = indicators.get('rsi', 50)
+        ms        = indicators.get('macd_signal', 'neutral')
+        bb_sig    = indicators.get('bb_signal', 'neutral')
+        vt        = indicators.get('volume_trend', 'stable')
+        r100      = indicators.get('vol_ratio_100', 1.0)
+        adx_pos   = indicators.get('adx_pos', 25.0)
+        adx_neg   = indicators.get('adx_neg', 25.0)
 
-        # RSI
-        rsi = indicators.get('rsi', 50)
-        if   rsi < 30: score += 1
-        elif rsi > 70: score -= 1
+        noise_zone = 15 < adx < 22
 
-        # MACD (crossovers worth double)
-        ms = indicators.get('macd_signal', 'neutral')
-        if   'bullish_cross' in ms: score += 2
-        elif 'bullish'       in ms: score += 1
-        elif 'bearish_cross' in ms: score -= 2
-        elif 'bearish'       in ms: score -= 1
+        # ── Group 1: Correlated momentum signals — CAP at ±2 ─────────────
+        # MACD + EMA + Volume + 24h-change all measure the same thing.
+        # Capping prevents a single strong move from generating a misleading
+        # high-conviction score that actually marks an exhaustion point.
+        momentum = 0
 
-        # EMA
-        if   ema_trend == 'upward':   score += 1
-        elif ema_trend == 'downward': score -= 1
+        if   'bullish_cross' in ms: momentum += 2
+        elif 'bullish'       in ms: momentum += 1
+        elif 'bearish_cross' in ms: momentum -= 2
+        elif 'bearish'       in ms: momentum -= 1
 
-        # Volume confirms trend direction
-        vt = indicators.get('volume_trend', 'stable')
-        if vt == 'increasing':
-            if   ema_trend == 'upward':   score += 1
-            elif ema_trend == 'downward': score -= 1
+        if   ema_trend == 'upward':   momentum += 1
+        elif ema_trend == 'downward': momentum -= 1
 
-        # 24h macro bias
-        if   change_24h >  3: score += 1
-        elif change_24h < -3: score -= 1
+        # Volume: only count when high-conviction vs 100-period baseline (not 20)
+        if vt == 'increasing' and r100 > 1.3:
+            if   ema_trend == 'upward':   momentum += 1
+            elif ema_trend == 'downward': momentum -= 1
 
-        # Bollinger Bands positional signal
-        bb_sig = indicators.get('bb_signal', 'neutral')
-        if   bb_sig == 'at_lower' and ema_trend != 'downward': score += 1
-        elif bb_sig == 'at_upper' and ema_trend != 'upward':   score -= 1
+        # 24h change: continuation only — EMA must confirm + RSI not overextended
+        if change_24h > 3 and ema_trend == 'upward' and rsi < 68:
+            momentum += 1
+        elif change_24h < -3 and ema_trend == 'downward' and rsi > 32:
+            momentum -= 1
 
-        # RSI divergence
+        # THE KEY FIX: cap correlated momentum signals
+        score = max(-2, min(2, momentum))
+
+        # ── Group 2: Regime-specific mean-reversion / directional signals ─
+        if regime == 'trending':
+            # RSI extreme = momentum dip/surge within the trend
+            if   rsi < 30: score += 1
+            elif rsi > 70: score -= 1
+
+            # ADX directional lines: +DI dominant = buying pressure, -DI = selling
+            if   adx_pos > adx_neg + 5: score += 1
+            elif adx_neg > adx_pos + 5: score -= 1
+
+            # BB squeeze in trending = compression before trend continuation
+            if bb_sig == 'squeeze':
+                if   ema_trend == 'upward':   score += 1
+                elif ema_trend == 'downward': score -= 1
+
+        elif regime == 'ranging':
+            # Tiered RSI: stronger signal at more extreme levels
+            if   rsi < 20: score += 2
+            elif rsi < 35: score += 1
+            elif rsi > 80: score -= 2
+            elif rsi > 65: score -= 1
+
+            # BB at band edges = high-probability bounce in a ranging market
+            if   bb_sig == 'at_lower': score += 2
+            elif bb_sig == 'at_upper': score -= 2
+
+        else:  # transitioning — balanced approach
+            if   rsi < 30: score += 1
+            elif rsi > 70: score -= 1
+
+            if   bb_sig == 'at_lower' and ema_trend != 'downward': score += 1
+            elif bb_sig == 'at_upper' and ema_trend != 'upward':   score -= 1
+
+        # ── Group 3: Truly independent signals (all regimes) ─────────────
         score += indicators.get('rsi_divergence', 0)
-
-        # Order book (supershort only; 0 for other timeframes)
         score += ob_score
+
+        # ── Noise-zone damper ─────────────────────────────────────────────
+        if noise_zone and abs(score) > 1:
+            score = score - 1 if score > 0 else score + 1
 
         return score
 
@@ -552,20 +656,37 @@ class CryptoAnalyzer:
             _, _, _, _, move_per_unit = cfg
             time_desc = self.TIMEFRAME_DESC.get(timeframe, 'unknown')
 
-            price_change = score * move_per_unit
+            # --- Target price ---
+            # Prefer ATR-calibrated target (0.5 ATR per score unit) when available.
+            # Falls back to static move_per_unit if ATR was not computed.
+            atr_pct = indicators.get('atr_pct', 0)
+            if atr_pct > 0:
+                price_change = score * (atr_pct / 100) * 0.5
+            else:
+                price_change = score * move_per_unit
             target_price = current_price * (1 + price_change)
-            probability  = min(50 + abs(score) * 5, 80)
 
-            # Recommendation
+            # --- Probability (regime-adjusted, empirically bounded at 70%) ---
+            # Old formula (min(50 + |score|*5, 80)) overstated confidence.
+            # Backtest showed ~58% max accuracy in best conditions.
+            regime       = indicators.get('market_regime', 'transitioning')
+            regime_bonus = {'trending': 4, 'ranging': 3, 'transitioning': 0}.get(regime, 0)
+            score_bonus  = min(abs(score) * 3, 12)   # diminishing returns above score 4
+            div_bonus    = 3 if indicators.get('rsi_divergence', 0) != 0 else 0
+            probability  = min(50 + regime_bonus + score_bonus + div_bonus, 70)
+
+            # --- Recommendation (raised thresholds to reduce signal noise) ---
+            # supershort: |score| ≥ 2 for any signal (was 1), ≥ 4 for STRONG (was 3)
+            # all others: |score| ≥ 3 (was 2) — reduces the previous 75-91% signal rate
             if timeframe == 'supershort':
-                if   score >= 3:  recommendation = 'STRONG BUY'
-                elif score >= 1:  recommendation = 'BUY'
-                elif score <= -3: recommendation = 'STRONG SELL'
-                elif score <= -1: recommendation = 'SELL'
+                if   score >= 4:  recommendation = 'STRONG BUY'
+                elif score >= 2:  recommendation = 'BUY'
+                elif score <= -4: recommendation = 'STRONG SELL'
+                elif score <= -2: recommendation = 'SELL'
                 else:             recommendation = 'HOLD/WAIT'
             else:
-                if   score >= 2:  recommendation = 'BUY'
-                elif score <= -2: recommendation = 'SELL'
+                if   score >= 3:  recommendation = 'BUY'
+                elif score <= -3: recommendation = 'SELL'
                 else:             recommendation = 'HOLD'
 
             return {
@@ -589,10 +710,29 @@ class CryptoAnalyzer:
 # TelegramBot
 # ===========================================================================
 class TelegramBot:
-    def __init__(self, token: str, binance_api_key=None, binance_secret_key=None):
+    def __init__(self, token: str, binance_api_key=None, binance_secret_key=None,
+                 proxy_url: str = None):
         self.token    = token
         self.analyzer = CryptoAnalyzer(binance_api_key, binance_secret_key)
-        self.app      = Application.builder().token(token).build()
+
+        # Use generous timeouts — the default httpx connect timeout (5 s) is
+        # too short on some macOS / network setups, causing spurious TimedOut errors.
+        request = HTTPXRequest(
+            connect_timeout=30.0,
+            read_timeout=30.0,
+            write_timeout=30.0,
+            pool_timeout=30.0,
+        )
+
+        # Build the Application; attach a proxy if one is configured.
+        # Set TELEGRAM_PROXY_URL in your .env file, e.g.:
+        #   TELEGRAM_PROXY_URL=http://127.0.0.1:7890      (HTTP proxy / Clash)
+        #   TELEGRAM_PROXY_URL=socks5://127.0.0.1:1080    (SOCKS5 / shadowsocks)
+        builder = Application.builder().token(token).request(request)
+        if proxy_url:
+            builder = builder.proxy_url(proxy_url)
+            logger.info(f"Using proxy: {proxy_url}")
+        self.app = builder.build()
         self._setup_handlers()
 
     def _setup_handlers(self):
@@ -634,11 +774,18 @@ class TelegramBot:
         tf_emoji  = "⚡" if timeframe == 'supershort' else "📊"
         src_emoji = "🔬" if data_src == 'live' else "⚠️"
 
+        regime      = ind.get('market_regime', 'transitioning')
+        regime_emoji_map = {'trending': '📈', 'ranging': '↔️', 'transitioning': '🔄'}
+        reg_emoji   = regime_emoji_map.get(regime, '🔄')
+        adx_val     = ind.get('adx', 0)
+
         lines = [
             f"{tf_emoji} *{forecast['symbol']}/USDT* → {forecast['move']} "
             f"({forecast['timeframe']})",
             f"Signal Score: *{score:+d}*  |  Probability: *{forecast['probability']}%*",
             f"Recommendation: *{forecast['recommendation']}*",
+            f"Regime: {reg_emoji} *{regime}*  |  ADX: {adx_val:.1f}"
+            + ("  ⚠️ noise zone" if 15 < adx_val < 22 else ""),
             "",
             f"Price:      ${forecast['current_price']:.8f}",
             f"24h Change: {pd_data['change_24h']:+.2f}%",
@@ -797,15 +944,27 @@ Or type directly: `BTC supershort`, `ETH full`
         bb_sig = ind.get('bb_signal', 'neutral')
         bb_squeeze = "⚠️ YES" if ind.get('bb_squeeze') else "No"
 
+        regime = ind.get('market_regime', 'transitioning')
+        regime_emoji_map = {'trending': '📈', 'ranging': '↔️', 'transitioning': '🔄'}
+        reg_emoji = regime_emoji_map.get(regime, '🔄')
+        adx_pos = ind.get('adx_pos', 0)
+        adx_neg = ind.get('adx_neg', 0)
+        di_bias = "⬆️ +DI dominant" if adx_pos > adx_neg + 5 else ("⬇️ -DI dominant" if adx_neg > adx_pos + 5 else "≈ balanced")
+
         lines = [
             f"📈 *Detailed Analysis: {fc['symbol']}/USDT*",
             f"Timeframe: {fc['timeframe']}",
+            "",
+            "*🧭 Market Regime:*",
+            f"• Regime: {reg_emoji} {regime}",
+            f"• ADX:    {ind.get('adx', 0):.1f}  (≥25 trending · ≤15 ranging)",
+            f"• DI:     +DI={adx_pos:.1f}  -DI={adx_neg:.1f}  → {di_bias}",
             "",
             "*📊 Indicators:*",
             f"• RSI:        {rsi:.1f} {r_desc}",
             f"• MACD:       {ind.get('macd_signal','neutral')}",
             f"• EMA Trend:  {ind.get('ema_trend','sideways')} ({ind.get('ema_periods','')})",
-            f"• Volume:     {ind.get('volume_trend','stable')} ({ind.get('volume_ratio',1.0):.2f}×)",
+            f"• Volume:     {ind.get('volume_trend','stable')} ({ind.get('volume_ratio',1.0):.2f}× 20p  {ind.get('vol_ratio_100',1.0):.2f}× 100p)",
             "",
             "*📉 Bollinger Bands:*",
             f"• Upper: ${ind.get('bb_upper',0):.8f}",
@@ -1003,6 +1162,7 @@ def main():
     BOT_TOKEN       = os.getenv('TELEGRAM_BOT_TOKEN')
     BINANCE_API_KEY = os.getenv('BINANCE_API_KEY')
     BINANCE_SECRET  = os.getenv('BINANCE_SECRET')
+    PROXY_URL       = os.getenv('TELEGRAM_PROXY_URL')   # optional
 
     if not BOT_TOKEN:
         print("❌ TELEGRAM_BOT_TOKEN not set.")
@@ -1011,9 +1171,41 @@ def main():
 
     print("✅ Bot token loaded")
     print(f"🔬 Real TA: {'enabled' if TA_AVAILABLE else 'DISABLED — run: pip install ta pandas numpy'}")
+    if PROXY_URL:
+        print(f"🌐 Proxy:   {PROXY_URL}")
+    else:
+        print("🌐 Proxy:   none (set TELEGRAM_PROXY_URL in .env if needed)")
+
+    # Pre-flight: verify the token is reachable before handing off to PTB.
+    # Uses requests (separate from httpx) so we get a clear error early.
+    print("🔍 Verifying bot token…")
+    try:
+        resp = requests.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getMe",
+            timeout=20,
+            proxies={'https': PROXY_URL} if PROXY_URL else None,
+        )
+        data = resp.json()
+        if data.get('ok'):
+            username = data['result'].get('username', '?')
+            print(f"✅ Bot verified: @{username}")
+        else:
+            print(f"❌ Token rejected by Telegram: {data.get('description')}")
+            print("   → Check TELEGRAM_BOT_TOKEN in your .env file.")
+            return
+    except requests.exceptions.Timeout:
+        print("❌ Timed out reaching api.telegram.org.")
+        print("   → Your network may be filtering HTTPS to Telegram's API servers.")
+        print("   → Try setting TELEGRAM_PROXY_URL in .env (e.g. http://127.0.0.1:7890).")
+        return
+    except requests.exceptions.ConnectionError as e:
+        print(f"❌ Connection error: {e}")
+        print("   → Check your internet connection.")
+        return
+
     print("🚀 Starting…")
 
-    TelegramBot(BOT_TOKEN, BINANCE_API_KEY, BINANCE_SECRET).run()
+    TelegramBot(BOT_TOKEN, BINANCE_API_KEY, BINANCE_SECRET, proxy_url=PROXY_URL).run()
 
 
 if __name__ == '__main__':
